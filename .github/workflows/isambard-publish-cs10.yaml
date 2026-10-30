@@ -1,0 +1,90 @@
+# Isambard: publish the arm64 KubeVirt node images built on CentOS Stream 10 (libvirt 12.x), to ghcr.io/isambard-sc/kubevirt.
+#
+# Why: upstream's published virt-launcher (quay.io/kubevirt) is built on Stream 9 and ships libvirt 11.10 (v1.10.0-beta.0's
+# arm64 image has libvirt.so.0.11010.0). The IOMMUFD gate, and with it GraceIOVirtualization (nested SMMUv3 for GH200
+# passthrough), needs libvirt >= 12.2. Upstream supports a Stream 10 build (KUBEVIRT_CENTOS_STREAM_VERSION=10, libvirt
+# 12.5.0-4.el10 at this tag) but doesn't publish it. This branch is the upstream tag plus this file, nothing else.
+#
+# Only the images that run on the arm64 GPU nodes are built: virt-handler (its image carries the CS10 /var/run fixups,
+# PR #18951), virt-launcher and sidecar-shim. virt-operator, virt-api and virt-controller stay upstream's quay.io images
+# of the same tag: same source, and they run on the x86 control plane. The cluster picks each image by digest through
+# virt-operator's VIRT_*_IMAGE env vars (platforms-gitops apps/base/kubevirt-operator).
+#
+# Built natively on an arm64 runner: hack/dockerized picks the Stream 9 cross-compile builder for a cross build even when
+# Stream 10 is asked for, so cross-building from x86 would silently give the wrong libvirt.
+name: isambard-publish-cs10
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish (upstream tag + -cs10)
+        required: true
+        default: v1.10.0-beta.0-cs10
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: isambard-publish-cs10
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      KUBEVIRT_CENTOS_STREAM_VERSION: "10"
+      KUBEVIRT_CRI: docker
+      BUILD_ARCH: aarch64
+      DOCKER_PREFIX: ghcr.io/isambard-sc/kubevirt
+      DOCKER_TAG: ${{ inputs.tag }}
+      PUSH_TARGETS: virt-handler virt-launcher sidecar-shim
+    steps:
+      - name: Check tag
+        run: |
+          [[ "$DOCKER_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?-cs10$ ]] || { echo "bad tag: $DOCKER_TAG"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The bazel build plus the Stream 10 builder image need tens of GB; the runner's root disk is small.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Build and push
+        run: make bazel-push-images
+
+      # Fail the run if the launcher didn't get the Stream 10 libvirt, then record the digests for platforms-gitops.
+      - name: Verify libvirt and record digests
+        run: |
+          launcher="$DOCKER_PREFIX/virt-launcher:$DOCKER_TAG"
+          docker pull -q "$launcher"
+          cid=$(docker create "$launcher")
+          libvirt=$(docker export "$cid" | tar -t | grep -oE 'usr/lib64/libvirt\.so\.0\.[0-9]+' | head -1)
+          docker rm "$cid" >/dev/null
+          echo "launcher libvirt: $libvirt"
+          [[ "$libvirt" =~ \.so\.0\.([0-9]+)$ ]] && (( BASH_REMATCH[1] >= 12002 )) || { echo "libvirt < 12.2"; exit 1; }
+          {
+            echo "### $DOCKER_TAG"
+            echo
+            echo "launcher libvirt: \`$libvirt\`"
+            echo
+            echo '```'
+            for t in $PUSH_TARGETS; do
+              echo "$DOCKER_PREFIX/$t@$(docker buildx imagetools inspect "$DOCKER_PREFIX/$t:$DOCKER_TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
