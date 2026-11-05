@@ -5163,10 +5163,10 @@ rpm(
 )
 
 rpm(
-    name = "kernel-headers-0__6.12.0-273.el10.aarch64",
-    sha256 = "5f44a56357eb9735c93f90b94b8c6d89b78d5536d47d99c63d6a0b7f907317b0",
+    name = "kernel-headers-0__6.12.0-280.el10.aarch64",
+    sha256 = "c1481ade27d0b79ce9c8351be743f7bdfd1b4fc3a3e85f09691d75ce4c77e2e9",
     urls = [
-        "http://mirror.stream.centos.org/10-stream/AppStream/aarch64/os/Packages/kernel-headers-6.12.0-273.el10.aarch64.rpm",
+        "http://mirror.stream.centos.org/10-stream/AppStream/aarch64/os/Packages/kernel-headers-6.12.0-280.el10.aarch64.rpm",
     ],
 )
 
